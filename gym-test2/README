@@ -1,0 +1,7 @@
+Be sure to use the python in /usr/bin/python3 when making the venv.
+
+pip install 'gymnasium[box2d]'
+pip install keras tensorflow
+pip install tensorboard_plugin_profile
+pip install jax
+pip install torch
