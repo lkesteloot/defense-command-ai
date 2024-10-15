@@ -7,7 +7,7 @@ import random
 import numpy as np
 import gymnasium as gym
 from keras.models import Sequential
-from keras.layers import InputLayer, Dense, Embedding, Reshape
+from keras.layers import InputLayer, Dense
 import tensorflow as tf
 import time
 
@@ -145,7 +145,6 @@ def learn(model, steps, gamma):
     print("    timing 2", int((time.perf_counter() - before)*1000))
 
     target_vector[np.arange(target_vector.shape[0]),action] = target
-    #target_vector = target_vector.reshape(-1, env.action_space.n)
 
     before = time.perf_counter()
     model.fit(old_input_tensor, target_vector, epochs=10, verbose=0)
