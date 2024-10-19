@@ -5,3 +5,4 @@ pip install keras tensorflow
 pip install tensorboard_plugin_profile
 pip install jax
 pip install torch
+pip install matplotlib

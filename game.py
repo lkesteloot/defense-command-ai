@@ -1,5 +1,6 @@
 
 import socket, subprocess, time
+from dataclasses import dataclass
 
 NUM_ENTITIES = 40
 
@@ -40,17 +41,18 @@ ACTIONS = [
         "F",
         "<F",
         ">F",
-        # TODO add ABM (any digit).
+        # TODO add ABM:
+        # "!",
 ]
 
 def isEnemyType(entityType):
     return entityType is not None and entityType >= TYPE_ENEMY_1 and entityType <= TYPE_ENEMY_8
 
+@dataclass(frozen=True)
 class EntityState:
-    def __init__(self, entity_type, x, y):
-        self.entity_type = entity_type
-        self.x = x
-        self.y = y
+    entity_type: int
+    x: int
+    y: int
 
 class GameState:
     def __init__(self):
@@ -74,21 +76,36 @@ class GameState:
         self.ships_left = ships_left
         self.abms_left = abms_left
 
+    def clone(self):
+        o = GameState()
+        # Entities are immutable, we can make a shallow copy of this list:
+        o.entities = self.entities[:]
+        o.score = self.score
+        o.ships_left = self.ships_left
+        o.abms_left = self.abms_left
+        o.game_over = self.game_over
+        return o
+
     def __repr__(self):
         return "GameState[%d entities, score %s, ships %s, abms %s]" % (
                 sum(1 for entity in self.entities if entity),
                 self.score, self.ships_left, self.abms_left)
 
 class LiveGame:
-    def __init__(self):
+    def __init__(self, fast):
         self.state = GameState()
 
+        path = "/Applications"
+        path = "/Users/lk/Downloads/trs80gp 2024-10-14 23-13-26"
+
         args = [
-            "/Applications/trs80gp.app/Contents/MacOS/trs80gp",
+            path + "/trs80gp.app/Contents/MacOS/trs80gp",
             # Model III.
             "-m3",
             # Run as fast as possible.
             "-turbo",
+            # No authentic display.
+            "-na",
             # Disable floppy disk controller.
             "-dx",
             # Printer (output) port.
@@ -100,6 +117,11 @@ class LiveGame:
             # Cassette to launch.
             "remdc.cas",
         ]
+        if fast:
+            args.extend([
+                # Update display only once per second.
+                "-haste",
+            ])
         self.proc = subprocess.Popen(args)
 
         # Wait for it to start before we try to connect.
@@ -125,6 +147,8 @@ class LiveGame:
         self.write_line(str(seed))
 
     def read_state(self):
+        # The server only sends us diffs, so we must update our
+        # own state instead of creating it from scratch.
         while True:
             index, param1, param2, param3 = self.read_line_values()
             if index < 128:
@@ -138,7 +162,7 @@ class LiveGame:
                 self.state.game_over = True
                 break
 
-        return self.state
+        return self.state.clone()
 
     # Blocks to get the next line from the game. Returns a tuple of integers.
     def read_line_values(self):
