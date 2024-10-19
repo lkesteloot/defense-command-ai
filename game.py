@@ -86,6 +86,10 @@ class GameState:
         o.game_over = self.game_over
         return o
 
+    # A string representing the NUM_ENTITIES entity types active right now.
+    def list_entity_types(self):
+        return "".join("%x" % e.entity_type if e is not None else "." for e in self.entities)
+
     def __repr__(self):
         return "GameState[%d entities, score %s, ships %s, abms %s]" % (
                 sum(1 for entity in self.entities if entity),
@@ -145,6 +149,9 @@ class LiveGame:
 
         # Send seed.
         self.write_line(str(seed))
+
+        # Return initial state.
+        return self.read_state()
 
     def read_state(self):
         # The server only sends us diffs, so we must update our

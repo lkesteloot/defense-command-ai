@@ -29,7 +29,7 @@ DDQN = True # Use Double DQN.
 REPLAY_BUFFER_FILENAME = "games.pkl"
 
 # Just random play, no learning:
-if True:
+if False:
     EPSILON_RANGE = (1.0, 1.0)
     UPDATE_PERIOD = None
 
@@ -113,41 +113,107 @@ class Transition:
         return "Transition[%s, \"%s\", %d, %s]" % \
                 (self.previous_phi, game.ACTIONS[self.action], self.reward, self.next_phi)
 
-def main():
-    # Replay buffer of Transition objects.
-    initial_replay_buffer = []
-    if os.path.exists(REPLAY_BUFFER_FILENAME):
-        with open(REPLAY_BUFFER_FILENAME, "rb") as f:
-            initial_replay_buffer = pickle.load(f)
-        print("Loaded replay buffer:", len(initial_replay_buffer))
-    replay_buffer = deque(initial_replay_buffer, REPLAY_BUFFER_SIZE)
+class DQN:
+    def __init__(self, input_size, output_size):
+        self.input_size = input_size
+        self.output_size = output_size
 
+        self.replay_buffer = deque([], REPLAY_BUFFER_SIZE)
+
+        # Create neural net.
+        self.model = Sequential([
+            InputLayer( (input_size,) ),
+            Dense(1, activation='relu'), # relu = rectified linear unit = max(0, x)
+            #Dense(50, activation='relu'),
+            #Dense(50, activation='relu'),
+            Dense(output_size, activation='linear'),
+        ])
+        self.model.compile(loss='mse', optimizer=Adam(), metrics=['mae'])
+        self.model.summary()
+
+        if False: # TODO remove
+            # See what noise we have in the blank NN.
+            x = np.ones( (1,input_size) )*100
+            print(x)
+            y = self.model.predict(x, verbose=2)
+            print(y)
+
+        # Make a copy of the model to use as the target model.
+        self.target_model = clone_model(self.model)
+
+    def update(self):
+        # Sample minibatch of transitions from replay buffer.
+        # TODO: Sample proportionally to loss.
+        transitions = random.sample(self.replay_buffer, min(MINIBATCH_SIZE, len(self.replay_buffer)))
+
+        # Compute predictions of batch.
+        previous_input_tensors = np.array([transition.previous_phi.input_tensor() for transition in transitions])
+        predictions = self.model.predict(previous_input_tensors, verbose=0)
+
+        # Compute targets of batch.
+        rewards = np.array([transition.reward for transition in transitions])
+        # If end of game, then it's just the reward. Otherwise it's the reward
+        # plus expected value of best action using target_model.
+        live_game_indices = np.array([i for i in range(len(transitions))
+                                      if not transitions[i].next_phi.game_states[-1].game_over])
+        #print("live_game_indices", live_game_indices)
+        next_input_tensors = np.array([transitions[i].next_phi.input_tensor() for i in live_game_indices])
+        #print("next_input_tensors", next_input_tensors[0])
+        if DDQN:
+            # DDQN
+            live_futures = self.model.predict(next_input_tensors, verbose=0)
+            #print("live_futures", live_futures[0])
+            best_live_future_indices = np.argmax(live_futures, axis=1)
+            live_target_futures = self.target_model.predict(next_input_tensors, verbose=0)
+            best_live_futures = live_target_futures[
+                    np.arange(live_target_futures.shape[0]),best_live_future_indices]
+            #print("best_live_futures", best_live_futures)
+            best_futures = np.zeros(len(transitions))
+            best_futures[live_game_indices] = best_live_futures
+        else:
+            # DQN
+            live_futures = self.target_model.predict(next_input_tensors, verbose=0)
+            #print("live_futures", live_futures[0])
+            best_live_futures = np.max(live_futures, axis=1)
+            #print("best_live_futures", best_live_futures)
+            best_futures = np.zeros(len(transitions))
+            best_futures[live_game_indices] = best_live_futures
+        targets = rewards + GAMMA*best_futures
+
+        # Update targets for the actions we actually took.
+        actions = np.array([transition.action for transition in transitions])
+        predictions[np.arange(predictions.shape[0]),actions] = targets
+
+        # Perform gradient descent.
+        history = self.model.fit(previous_input_tensors, predictions, epochs=1, verbose=0)
+        print("metric", history.history["loss"], history.history["mae"])
+
+    def take_target_model_snapshot(self):
+        self.target_model = clone_model(self.model)
+
+    def load_replay_buffer(self):
+        # Replay buffer of Transition objects.
+        if os.path.exists(REPLAY_BUFFER_FILENAME):
+            with open(REPLAY_BUFFER_FILENAME, "rb") as f:
+                new_transitions = pickle.load(f)
+                self.replay_buffer.extend(new_transitions)
+            print("Loaded replay buffer:", len(new_transitions))
+
+    def dump_replay_buffer(self):
+        before = time.perf_counter()
+        with open(REPLAY_BUFFER_FILENAME, "wb") as f:
+            pickle.dump(self.replay_buffer, f)
+        after = time.perf_counter()
+        print("dqn dump time", int((after - before)*1000), "ms")
+
+def main():
     # Parameters of the neural network.
     input_tensor_shape = Phi(None, game.GameState()).input_tensor().shape
     print("input_tensor_shape", input_tensor_shape)
     action_count = len(game.ACTIONS)
 
-    # Create neural net.
-    model = Sequential([
-        InputLayer(input_tensor_shape),
-        Dense(1, activation='relu'), # relu = rectified linear unit = max(0, x)
-        #Dense(50, activation='relu'),
-        #Dense(50, activation='relu'),
-        Dense(action_count, activation='linear'),
-    ])
-    model.compile(loss='mse', optimizer=Adam(), metrics=['mae'])
-    model.summary()
-
-    if False: # TODO remove
-        # See what noise we have in the blank NN.
-        x = np.ones( (1,input_tensor_shape[0]) )*100
-        print(x)
-        y = model.predict(x, verbose=2)
-        print(y)
-        return
-
-    # Make a copy of the model to use as the target model.
-    target_model = clone_model(model)
+    dqn = DQN(input_tensor_shape[0], action_count)
+    dqn.load_replay_buffer()
 
     # TODO I think the Lua version has a single loop of steps and they
     # restart the game when it finishes. Might make it easier to re-use the
@@ -156,40 +222,40 @@ def main():
 
     live_game = game.LiveGame(False)
     start_time = time.perf_counter()
-    print("start time", start_time)
 
     # An episode is a full play of the game.
     for episode in range(EPISODE_COUNT):
         now = time.perf_counter()
         epsilon = EPSILON_RANGE[0] + (EPSILON_RANGE[1] - EPSILON_RANGE[0])*min(episode/EPISODE_EXPLORE_COUNT, 1)
         estimated_minutes_left = 0 if episode == 0 else EPISODE_COUNT/episode*(now - start_time)/60
-        print("episode", episode, "step", step, "epsilon", epsilon, "replay buffer", len(replay_buffer), "time", now, "minutes left", int(estimated_minutes_left))
+        print("episode", episode, "step", step, "epsilon", epsilon, "replay buffer", len(dqn.replay_buffer), "time", now, "minutes left", int(estimated_minutes_left))
 
         # Run the game.
         seed = episode
-        live_game.start_new_game(seed)
+        game_state = live_game.start_new_game(seed)
 
         # Initialize our game state.
-        game_state = live_game.read_state()
         phi = Phi(None, game_state)
 
         # Each iteration is an action chosen in the game.
         while True:
-            # Decide whether to expore or exploit.
+            # Decide whether to explore or exploit.
             if random.random() < epsilon:
                 # Explore.
-                action = random.randrange(0, action_count)
+                action = random.randrange(0, dqn.output_size)
             else:
                 # Exploit.
-                actions = model.predict(phi.input_tensor()[np.newaxis,:], verbose=0)[0]
+                actions = dqn.model.predict(phi.input_tensor()[np.newaxis,:], verbose=0)[0]
                 action = np.argmax(actions)
                 print(actions, action, game.ACTIONS[action])
 
             # Execute action in game, get next state.
             before = time.perf_counter()
+            next_phi = phi
             for i in range(ACTION_REPEAT):
                 live_game.perform_action(action)
                 game_state = live_game.read_state()
+                next_phi = Phi(next_phi, game_state)
                 #print("player x", game_state.entities[0].x)
                 if game_state.game_over:
                     break
@@ -197,76 +263,27 @@ def main():
                 print("Game over, score =", game_state.score)
                 break
             after = time.perf_counter()
-            #print("update time", int((after - before)*1000))
-            #print(" ".join("%x" % e.entity_type if e is not None else "." for e in game_state.entities))
-            next_phi = Phi(phi, game_state)
+            #print("game action time", int((after - before)*1000))
 
             # Make transition to capture what we experienced.
             transition = Transition(phi, action, next_phi)
             phi = next_phi
 
             # Append transition to replay buffer.
-            replay_buffer.append(transition)
+            dqn.replay_buffer.append(transition)
             #print(transition, phi.game_states[-1].entities[0].x)
 
             if UPDATE_PERIOD is not None and step % UPDATE_PERIOD == 0:
-                # Sample minibatch of transitions from replay buffer.
-                # TODO: Sample proportionally to loss.
-                transitions = random.sample(replay_buffer, min(MINIBATCH_SIZE, len(replay_buffer)))
-
-                # Compute predictions of batch.
-                previous_input_tensors = np.array([transition.previous_phi.input_tensor() for transition in transitions])
-                predictions = model.predict(previous_input_tensors, verbose=0)
-
-                # Compute targets of batch.
-                rewards = np.array([transition.reward for transition in transitions])
-                # If end of game, then it's just the reward. Otherwise it's the reward
-                # plus expected value of best action using target_model.
-                live_game_indices = np.array([i for i in range(len(transitions))
-                                              if not transitions[i].next_phi.game_states[-1].game_over])
-                #print("live_game_indices", live_game_indices)
-                next_input_tensors = np.array([transitions[i].next_phi.input_tensor() for i in live_game_indices])
-                #print("next_input_tensors", next_input_tensors[0])
-                if DDQN:
-                    # DDQN
-                    live_futures = model.predict(next_input_tensors, verbose=0)
-                    #print("live_futures", live_futures[0])
-                    best_live_future_indices = np.argmax(live_futures, axis=1)
-                    live_target_futures = target_model.predict(next_input_tensors, verbose=0)
-                    best_live_futures = live_target_futures[
-                            np.arange(live_target_futures.shape[0]),best_live_future_indices]
-                    #print("best_live_futures", best_live_futures)
-                    best_futures = np.zeros(len(transitions))
-                    best_futures[live_game_indices] = best_live_futures
-                else:
-                    # DQN
-                    live_futures = target_model.predict(next_input_tensors, verbose=0)
-                    #print("live_futures", live_futures[0])
-                    best_live_futures = np.max(live_futures, axis=1)
-                    #print("best_live_futures", best_live_futures)
-                    best_futures = np.zeros(len(transitions))
-                    best_futures[live_game_indices] = best_live_futures
-                targets = rewards + GAMMA*best_futures
-
-                # Update targets for the actions we actually took.
-                actions = np.array([transition.action for transition in transitions])
-                predictions[np.arange(predictions.shape[0]),actions] = targets
-
-                # Perform gradient descent.
-                history = model.fit(previous_input_tensors, predictions, epochs=1, verbose=0)
-                print("metric", history.history["loss"], history.history["mae"])
+                dqn.update()
 
             # Periodically update our target model to our current model.
             step += 1
             if step % TARGET_MODEL_UPDATE_PERIOD == 0:
-                target_model = clone_model(model)
+                dqn.take_target_model_snapshot()
 
         if False:
-            before = time.perf_counter()
-            with open(REPLAY_BUFFER_FILENAME, "wb") as f:
-                pickle.dump(replay_buffer, f)
-            after = time.perf_counter()
-            print("pickling time", int((after - before)*1000), "ms")
+            # Save the replay buffer between every game.
+            dqn.dump_replay_buffer()
 
     live_game.kill()
 
