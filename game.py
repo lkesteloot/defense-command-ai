@@ -119,7 +119,7 @@ class LiveGame:
             "-ip",
             "@5005",
             # Cassette to launch.
-            "remdc.cas",
+            "competition/remdc.cas",
         ]
         if fast:
             args.extend([

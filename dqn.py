@@ -9,7 +9,6 @@ import numpy as np
 from keras.models import Sequential, clone_model
 from keras.layers import InputLayer, Dense
 from keras.optimizers import Adam
-import tensorflow as tf
 import time
 from collections import deque
 import game
