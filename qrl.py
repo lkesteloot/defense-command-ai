@@ -82,36 +82,42 @@ class Transition:
     def __init__(self, previous_phi, action, next_phi):
         self.previous_phi = previous_phi
         self.action = action
+        self.next_phi = next_phi
+
+    def compute_reward(self):
         if False:
             # Score.
             # TODO take into account number of gas cans.
             # TODO take into account 16-bit score wrapping.
-            self.reward = next_phi.game_states[-1].score - previous_phi.game_states[-1].score
+            reward = self.next_phi.game_states[-1].score - self.previous_phi.game_states[-1].score
         if True:
             # Move to the right.
-            self.reward = next_phi.game_states[-1].entities[0].x - previous_phi.game_states[-1].entities[0].x
-            # Peg to the right.
-            game_state = next_phi.game_states[-1]
-            self.reward += int(game_state.entities[0].x == 121)
+            game_state = self.next_phi.game_states[-1]
+            reward = 0
+            if game_state.entities[0].x > self.previous_phi.game_states[-1].entities[0].x:
+                reward = 1
+            else:
+                # Peg to the right.
+                reward = int(game_state.entities[0].x == 121)
         if False:
             # Move toward the bad guy.
-            game_state = previous_phi.game_states[-1]
+            game_state = self.previous_phi.game_states[-1]
             bad_guy = game_state.entities[36]
             target = bad_guy.x if bad_guy is not None else 0
             previous_diff = abs(game_state.entities[0].x - target)
-            game_state = next_phi.game_states[-1]
+            game_state = self.next_phi.game_states[-1]
             bad_guy = game_state.entities[36]
             target = bad_guy.x if bad_guy is not None else 0
             next_diff = abs(game_state.entities[0].x - target)
-            self.reward = previous_diff - next_diff
-        #print(self.reward, next_phi.game_states[-1].score, previous_phi.game_states[-1].score)
+            reward = previous_diff - next_diff
+        #print(reward, self.next_phi.game_states[-1].score, self.previous_phi.game_states[-1].score)
         # Clip to -1 to 1 like they do in the paper.
-        # self.reward = min(max(self.reward, -1), 1)
-        self.next_phi = next_phi
+        # reward = min(max(reward, -1), 1)
+        return reward
 
     def __repr__(self):
         return "Transition[%s, \"%s\", %d, %s]" % \
-                (self.previous_phi, game.ACTIONS[self.action], self.reward, self.next_phi)
+                (self.previous_phi, game.ACTIONS[self.action], self.compute_reward(), self.next_phi)
 
 class DQN:
     def __init__(self, input_size, output_size):
@@ -120,12 +126,13 @@ class DQN:
 
         self.replay_buffer = deque([], REPLAY_BUFFER_SIZE)
 
+        # Average of input and output.
+        middle_layer_size = (input_size + output_size) // 2
+
         # Create neural net.
         self.model = Sequential([
             InputLayer( (input_size,) ),
-            Dense(1, activation='relu'), # relu = rectified linear unit = max(0, x)
-            #Dense(50, activation='relu'),
-            #Dense(50, activation='relu'),
+            Dense(middle_layer_size, activation='relu'), # relu = rectified linear unit = max(0, x)
             Dense(output_size, activation='linear'),
         ])
         self.model.compile(loss='mse', optimizer=Adam(), metrics=['mae'])
@@ -151,7 +158,7 @@ class DQN:
         predictions = self.model.predict(previous_input_tensors, verbose=0)
 
         # Compute targets of batch.
-        rewards = np.array([transition.reward for transition in transitions])
+        rewards = np.array([transition.compute_reward() for transition in transitions])
         # If end of game, then it's just the reward. Otherwise it's the reward
         # plus expected value of best action using target_model.
         live_game_indices = np.array([i for i in range(len(transitions))
@@ -186,7 +193,8 @@ class DQN:
 
         # Perform gradient descent.
         history = self.model.fit(previous_input_tensors, predictions, epochs=1, verbose=0)
-        print("metric", history.history["loss"], history.history["mae"])
+        #print("metric", history.history["loss"], history.history["mae"])
+        return history.history["loss"][0], history.history["mae"][0]
 
     def take_target_model_snapshot(self):
         self.target_model = clone_model(self.model)
@@ -206,6 +214,20 @@ class DQN:
         after = time.perf_counter()
         print("dqn dump time", int((after - before)*1000), "ms")
 
+class BoxAverage:
+    def __init__(self, size):
+        self.buffer = deque([], size)
+        self.sum = 0
+
+    def append(self, value):
+        if len(self.buffer) == self.buffer.maxlen:
+            self.sum -= self.buffer[0]
+        self.sum += value
+        self.buffer.append(value)
+
+    def average(self):
+        return self.sum / len(self.buffer) if len(self.buffer) != 0 else 0
+
 def main():
     # Parameters of the neural network.
     input_tensor_shape = Phi(None, game.GameState()).input_tensor().shape
@@ -214,6 +236,25 @@ def main():
 
     dqn = DQN(input_tensor_shape[0], action_count)
     dqn.load_replay_buffer()
+
+    # Train on loaded replay buffer.
+    if True:
+        loss_average = BoxAverage(1000)
+        mae_average = BoxAverage(1000)
+        learn_step = 0
+        print("Step [domain]\tLoss [zero]\tMAE [right,zero]")
+        while learn_step < 10000:
+            loss, mae = dqn.update()
+            loss_average.append(loss)
+            mae_average.append(mae)
+            learn_step += 1
+            if learn_step % 100 == 0:
+                print("%5d %10.2f %10.2f" % (learn_step,
+                                             loss_average.average(),
+                                             mae_average.average()))
+            if learn_step % TARGET_MODEL_UPDATE_PERIOD == 0:
+                dqn.take_target_model_snapshot()
+        return
 
     # TODO I think the Lua version has a single loop of steps and they
     # restart the game when it finishes. Might make it easier to re-use the
