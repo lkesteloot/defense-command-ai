@@ -2,3 +2,6 @@
 logdir
 *.pkl
 out*
+*.h5
+prediction*.txt
+loss*.txt

@@ -63,7 +63,11 @@ class GameState:
         self.game_over = False
 
     def get_entities_by_types(self, entity_types):
-        return [entity for entity in self.entities if entity and entity.entity_type in entity_types]
+        return [entity for entity in self.entities
+                if entity and entity.entity_type in entity_types]
+
+    def get_fuel_can_count(self):
+        return len(self.get_entities_by_types([TYPE_FUEL_CAN]))
 
     def set_entity_state(self, entity_index, entity_type, x, y):
         if entity_type == TYPE_DEAD:
@@ -188,6 +192,7 @@ class LiveGame:
 
     def perform_action(self, action):
         self.write_line(ACTIONS[action])
+        return self.read_state()
 
     # Write the line to the game. The line must be a string and not include
     # any newline.
