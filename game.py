@@ -57,9 +57,9 @@ class EntityState:
 class GameState:
     def __init__(self):
         self.entities = [None for i in range(NUM_ENTITIES)]
-        self.score = None
-        self.ships_left = None
-        self.abms_left = None
+        self.score = 0
+        self.ships_left = 0
+        self.abms_left = 0
         self.game_over = False
 
     def get_entities_by_types(self, entity_types):
@@ -70,6 +70,8 @@ class GameState:
         return len(self.get_entities_by_types([TYPE_FUEL_CAN]))
 
     def set_entity_state(self, entity_index, entity_type, x, y):
+        if entity_index == 1:
+            print(1, entity_type, x, y)
         if entity_type == TYPE_DEAD:
             self.entities[entity_index] = None
         else:
@@ -123,7 +125,7 @@ class LiveGame:
             "-ip",
             "@5005",
             # Cassette to launch.
-            "competition/remdc.cas",
+            "competition/remdc-shot.cas",
         ]
         if fast:
             args.extend([

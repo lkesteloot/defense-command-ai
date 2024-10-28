@@ -14,6 +14,7 @@ from collections import deque
 import game
 
 # Hyperparameters.
+LEARNING_RATE=0.0001 # Default is 0.001.
 EPISODE_COUNT = 500 # Number of games to play.
 GAMMA = 0.99 # Discount factor.
 ## GAMMA = 0.00 # Myopic.
@@ -117,15 +118,31 @@ class Phi:
         # by the caller.
         game_state = self.game_states[-1]
 
-        # Fix data read from a file.
-        while len(self.game_states) < HISTORY_SIZE:
-            self.game_states.insert(0, self.game_states[0])
-
         if False:
             # Simple direction, left or right.
             return np.array([
                 move_recommendation(game_state),
             ])
+
+        if True:
+            # One-hot position of player, lowest enemy, and our bullet.
+            v = np.zeros(64*3)
+            player = get_player(game_state)
+            if player:
+                x = player.x//2
+                if x >= 0 and x < 64:
+                    v[x] = 1
+            lowest_enemy = get_lowest_enemy(game_state)
+            if lowest_enemy:
+                x = lowest_enemy.x//2
+                if x >= 0 and x < 64:
+                    v[64 + x] = 1
+            player_bullet = get_player_bullet(game_state)
+            if player_bullet:
+                x = player_bullet.x//2
+                if x >= 0 and x < 64:
+                    v[2*64 + x] = 1
+            return np.array(v)
 
         if False:
             # Minimal info for all states.
@@ -143,7 +160,7 @@ class Phi:
                 ])
             return np.array(x)
 
-        if True:
+        if False:
             # Minimal info.
             player = get_player(game_state)
             player_bullet = get_player_bullet(game_state)
@@ -164,20 +181,23 @@ class Phi:
                 # game_state.score,
             ])
 
-        if False:
-            # TODO provide a few game states, at least 2 but maybe 4.
+        if True:
+            # Full info.
             v = []
-            for i in range(game.NUM_ENTITIES):
-                entity = game_state.entities[i]
-                if entity is None:
-                    v.extend([0, 0, 0])
-                else:
-                    v.extend([1, entity.x, entity.y])
-            v.extend([
-                game_state.score,
-                game_state.ships_left,
-                game_state.abms_left,
-            ])
+            for game_state in self.game_states:
+                for i in range(game.NUM_ENTITIES):
+                    entity = game_state.entities[i]
+                    if entity is None:
+                        v.extend([0, 0, 0])
+                    else:
+                        v.extend([1,
+                                  normalize_x(entity.x),
+                                  normalize_y(entity.y)])
+                v.extend([
+                    game_state.score/10000, # Make it a small number.
+                    game_state.ships_left/4, # Normalize.
+                    game_state.abms_left/4, # Normalize.
+                ])
             return np.array(v)
 
     def __repr__(self):
@@ -195,11 +215,23 @@ class Transition:
         previous_game_state = self.previous_phi.game_states[-1]
         next_game_state = self.next_phi.game_states[-1]
 
+        reward = 0
+
+        if False:
+            # Penalize death.
+            if next_game_state.ships_left < previous_game_state.ships_left:
+                reward += -10
+
+            # Penalize being away from center.
+            player = get_player(next_game_state)
+            if player:
+                reward += -((player.x - 64)**2)/4096
+
         if True:
             # Score.
             # TODO take into account number of gas cans.
             # TODO take into account 16-bit score wrapping.
-            reward = next_game_state.score - previous_game_state.score
+            reward += max(next_game_state.score - previous_game_state.score, 0)
 
         if False:
             rec = move_recommendation(previous_game_state)
@@ -283,7 +315,7 @@ class DQN:
             Dense(output_size, activation='linear'),
             #Dense(output_size, activation='linear', kernel_initializer="zeros", bias_initializer="zeros"),
         ])
-        self.model.compile(loss='mse', optimizer=Adam(), metrics=['mae'])
+        self.model.compile(loss='mse', optimizer=Adam(learning_rate=LEARNING_RATE), metrics=['mae'])
         self.model.summary()
 
         if False: # TODO remove
@@ -377,14 +409,14 @@ class BoxAverage:
 def learn():
     # Parameters of the neural network.
     input_tensor_shape = Phi(None, game.GameState()).input_tensor().shape
-    print("phi", Phi(None, game.GameState()))
-    print("input_tensor", Phi(None, game.GameState()).input_tensor())
+    #print("phi", Phi(None, game.GameState()))
+    #print("input_tensor", Phi(None, game.GameState()).input_tensor())
     print("input_tensor_shape", input_tensor_shape)
     action_count = len(game.ACTIONS)
 
     dqn = DQN(input_tensor_shape[0], action_count)
-    print("Initial weights:")
-    dqn.print_weights()
+    #print("Initial weights:")
+    #dqn.print_weights()
     dqn.replay_buffer.load()
 
     if False and os.path.exists(WEIGHTS_FILENAME):
@@ -422,7 +454,7 @@ def learn():
                     dqn.take_target_model_snapshot()
                 if learn_step % 1000 == 0:
                     print("%d" % (learn_step,))
-                    dqn.print_weights()
+                    #dqn.print_weights()
                 if learn_step % 1000 == 0:
                     print("Saving weights to " + WEIGHTS_FILENAME)
                     dqn.model.save_weights(WEIGHTS_FILENAME)
@@ -513,6 +545,29 @@ def learn():
 
     live_game.kill()
 
+def print_actions_graph(actions, action):
+    min_q = actions.min()
+    max_q = actions.max()
+    diff = max_q - min_q
+    if diff == 0:
+        return
+
+    SIZE = 20
+
+    def make_band(i, ch):
+        value = max(int(round((actions[i] - min_q)/diff*SIZE)), 1)
+        left = (SIZE - value)//2
+        right = SIZE - value - left
+        s = " "*left + ch*value + " "*right
+        if i == action:
+            s = chr(27) + "[1;33m" + s + chr(27) + "[0m"
+        return s
+
+    print()
+    print(make_band(4, "<") + "  " + make_band(3, "^") + "  " + make_band(5, ">"))
+    print(make_band(1, "<") + "  " + make_band(0, ".") + "  " + make_band(2, ">"))
+    print()
+
 def play():
     # Parameters of the neural network.
     input_tensor_shape = Phi(None, game.GameState()).input_tensor().shape
@@ -520,30 +575,22 @@ def play():
     action_count = len(game.ACTIONS)
 
     dqn = DQN(input_tensor_shape[0], action_count)
-    dqn.replay_buffer.load()
 
-    if os.path.exists(WEIGHTS_FILENAME):
-        print("Loading weights from " + WEIGHTS_FILENAME)
-        dqn.model.load_weights(WEIGHTS_FILENAME)
-
-    dqn.print_weights()
-
-    # TODO I think the Lua version has a single loop of steps and they
-    # restart the game when it finishes.
-    step = 0
+    print("Loading weights from " + WEIGHTS_FILENAME)
+    dqn.model.load_weights(WEIGHTS_FILENAME)
+    #dqn.print_weights()
 
     live_game = game.LiveGame(False)
 
     # An episode is a full play of the game.
+    episode = 0
     for episode in range(EPISODE_COUNT):
         now = time.perf_counter()
 
         # Run the game.
         seed = episode
         game_state = live_game.start_new_game(seed)
-
-        if FOR_NOW:
-            game_step = 0
+        game_step = 0
 
         # Initialize our game state.
         phi = Phi(None, game_state)
@@ -551,35 +598,27 @@ def play():
         # Each iteration is an action chosen in the game.
         while True:
             input_tensor = phi.input_tensor()
-            if FOR_NOW:
-                time.sleep(0.050)
+            print(input_tensor)
+            time.sleep(0.040)
             actions = dqn.model.predict(input_tensor[np.newaxis,:], verbose=0)[0]
             action = np.argmax(actions)
-            if FOR_NOW and action < 3:
-                # Force fire.
-                action += 3
-            if FOR_NOW and game_step < 120:
-                # Move left to avoid initial death.
-                action = 1
-            print(input_tensor, actions, action, game.ACTIONS[action])
+            print_actions_graph(actions, action)
+            if game_step < 120 and action >= 3:
+                # Don't shoot to avoid initial death.
+                action -= 3
+            #print(input_tensor, actions, action, game.ACTIONS[action])
 
             # Execute action in game, get next state.
-            before = time.perf_counter()
             game_state = live_game.perform_action(action)
             next_phi = Phi(phi, game_state)
-            #print("player x", game_state.entities[0].x)
             if game_state.game_over:
                 print("Game over, score =", game_state.score)
                 break
-            after = time.perf_counter()
-            #print("game action time", int((after - before)*1000))
 
             phi = next_phi
+            game_step += 1
 
-            step += 1
-
-            if FOR_NOW:
-                game_step += 1
+        episode += 1
 
     live_game.kill()
 
@@ -654,7 +693,8 @@ def make_replay():
             replay_buffer.add(transition)
 
             if game_state.game_over:
-                time.sleep(5)
+                if DEBUG:
+                    time.sleep(5)
                 print("Game over, score =", game_state.score)
                 break
 
