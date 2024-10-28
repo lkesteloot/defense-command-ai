@@ -28,6 +28,7 @@ HISTORY_SIZE = 4 # Number of game states to include in NN inputs.
 ACTION_REPEAT = 4 # Number of times to repeat each action.
 UPDATE_PERIOD = 4 # Number of actions between NN update.
 DDQN = True # Use Double DQN.
+REPLAY_WINS = True
 REPLAY_BUFFER_FILENAME = "games.pkl"
 WEIGHTS_FILENAME = "trained.weights.h5"
 PREDICTIONS_FILENAME = "predictions.txt"
@@ -124,7 +125,7 @@ class Phi:
                 move_recommendation(game_state),
             ])
 
-        if True:
+        if False:
             # One-hot position of player, lowest enemy, and our bullet.
             v = np.zeros(64*3)
             player = get_player(game_state)
@@ -144,7 +145,7 @@ class Phi:
                     v[2*64 + x] = 1
             return np.array(v)
 
-        if False:
+        if True:
             # Minimal info for all states.
             x = []
             for game_state in self.game_states:
@@ -211,6 +212,12 @@ class Transition:
         self.action = action
         self.next_phi = next_phi
 
+    def get_score(self):
+        # Max to avoid getting negative score when game restarts.
+        previous_game_state = self.previous_phi.game_states[-1]
+        next_game_state = self.next_phi.game_states[-1]
+        return max(next_game_state.score - previous_game_state.score, 0)
+
     def compute_reward(self):
         previous_game_state = self.previous_phi.game_states[-1]
         next_game_state = self.next_phi.game_states[-1]
@@ -231,7 +238,7 @@ class Transition:
             # Score.
             # TODO take into account number of gas cans.
             # TODO take into account 16-bit score wrapping.
-            reward += max(next_game_state.score - previous_game_state.score, 0)
+            reward += self.get_score()
 
         if False:
             rec = move_recommendation(previous_game_state)
@@ -271,10 +278,15 @@ class Transition:
 
 class ReplayBuffer:
     def __init__(self, size):
+        # Deque of transitions.
         self.buffer = deque([], size)
 
     def sample(self, count):
-        return random.sample(self.buffer, min(count, len(self.buffer)))
+        if REPLAY_WINS:
+            indices = random.sample(self.wins, min(count, len(self.wins)))
+            return [self.buffer[i] for i in indices]
+        else:
+            return random.sample(self.buffer, min(count, len(self.buffer)))
 
     def add(self, transition):
         self.buffer.append(transition)
@@ -285,9 +297,18 @@ class ReplayBuffer:
             with open(REPLAY_BUFFER_FILENAME, "rb") as f:
                 new_transitions = pickle.load(f)
                 self.buffer.extend(new_transitions)
-            print("Loaded replay buffer:", len(new_transitions))
+            print(f"Loaded replay buffer: {len(new_transitions):,}")
         else:
             print("Replay buffer missing")
+
+        if REPLAY_WINS:
+            # Indices of wins and a few moves just before.
+            self.wins = set()
+            for i, transition in enumerate(self.buffer):
+                if transition.get_score() > 0:
+                    self.wins.update(range(max(i - 20, 0), i + 1))
+            self.wins = list(self.wins)
+            print(f"Wins {len(self.wins):,} ({len(self.wins)/len(self.buffer)*100:.1f}% of total)")
 
     def save(self):
         with open(REPLAY_BUFFER_FILENAME, "wb") as f:
