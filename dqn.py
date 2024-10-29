@@ -6,15 +6,14 @@ import pickle
 
 import random
 import numpy as np
-from keras.models import Sequential, clone_model
-from keras.layers import InputLayer, Dense
-from keras.optimizers import Adam
 import time
 from collections import deque
 import game
+from boxaverage import BoxAverage
+from ml import DQN
 
 # Hyperparameters.
-LEARNING_RATE=0.0001 # Default is 0.001.
+LEARNING_RATE=0.001 # Default is 0.001.
 EPISODE_COUNT = 500 # Number of games to play.
 GAMMA = 0.99 # Discount factor.
 ## GAMMA = 0.00 # Myopic.
@@ -27,10 +26,9 @@ TARGET_MODEL_UPDATE_PERIOD = 1000 # How often to update the target model.
 HISTORY_SIZE = 4 # Number of game states to include in NN inputs.
 ACTION_REPEAT = 4 # Number of times to repeat each action.
 UPDATE_PERIOD = 4 # Number of actions between NN update.
-DDQN = True # Use Double DQN.
-REPLAY_WINS = True
+DOUBLE_DQN = True # Use Double DQN.
+REPLAY_WINS = False
 REPLAY_BUFFER_FILENAME = "games.pkl"
-WEIGHTS_FILENAME = "trained.weights.h5"
 PREDICTIONS_FILENAME = "predictions.txt"
 LOSS_FILENAME = "loss.txt"
 
@@ -145,7 +143,7 @@ class Phi:
                     v[2*64 + x] = 1
             return np.array(v)
 
-        if True:
+        if False:
             # Minimal info for all states.
             x = []
             for game_state in self.game_states:
@@ -161,7 +159,7 @@ class Phi:
                 ])
             return np.array(x)
 
-        if False:
+        if True:
             # Minimal info.
             player = get_player(game_state)
             player_bullet = get_player_bullet(game_state)
@@ -224,9 +222,9 @@ class Transition:
 
         reward = 0
 
-        if False:
+        if True:
             # Penalize death.
-            if next_game_state.ships_left < previous_game_state.ships_left:
+            if False and next_game_state.ships_left < previous_game_state.ships_left:
                 reward += -10
 
             # Penalize being away from center.
@@ -234,7 +232,7 @@ class Transition:
             if player:
                 reward += -((player.x - 64)**2)/4096
 
-        if True:
+        if False:
             # Score.
             # TODO take into account number of gas cans.
             # TODO take into account 16-bit score wrapping.
@@ -281,6 +279,9 @@ class ReplayBuffer:
         # Deque of transitions.
         self.buffer = deque([], size)
 
+        # Lists are more efficient for sample() but don't work for add().
+        self.is_list = False
+
     def sample(self, count):
         if REPLAY_WINS:
             indices = random.sample(self.wins, min(count, len(self.wins)))
@@ -289,6 +290,8 @@ class ReplayBuffer:
             return random.sample(self.buffer, min(count, len(self.buffer)))
 
     def add(self, transition):
+        if self.is_list:
+            raise Exception("can't add to a list")
         self.buffer.append(transition)
 
     def load(self):
@@ -310,122 +313,25 @@ class ReplayBuffer:
             self.wins = list(self.wins)
             print(f"Wins {len(self.wins):,} ({len(self.wins)/len(self.buffer)*100:.1f}% of total)")
 
+        self.buffer = list(self.buffer)
+        self.is_list = True
+
     def save(self):
         with open(REPLAY_BUFFER_FILENAME, "wb") as f:
             pickle.dump(self.buffer, f)
 
-class DQN:
-    def __init__(self, input_size, output_size):
-        self.input_size = input_size
-        self.output_size = output_size
-
-        self.replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
-
-        # Average of input and output.
-        middle_layer_size = (input_size + output_size) // 2
-        middle_layer_size = input_size # Guaranteed not lossy.
-        middle_layer_size = 32
-
-        # Create neural net.
-        self.model = Sequential([
-            InputLayer( (input_size,) ),
-            # relu = rectified linear unit = max(0, x)
-            Dense(middle_layer_size, activation='relu'),
-            Dense(middle_layer_size, activation='relu'),
-            #Dense(middle_layer_size, activation='relu', kernel_initializer="zeros", bias_initializer="zeros"),
-            Dense(output_size, activation='linear'),
-            #Dense(output_size, activation='linear', kernel_initializer="zeros", bias_initializer="zeros"),
-        ])
-        self.model.compile(loss='mse', optimizer=Adam(learning_rate=LEARNING_RATE), metrics=['mae'])
-        self.model.summary()
-
-        if False: # TODO remove
-            # See what noise we have in the blank NN.
-            x = np.ones( (1,input_size) )*100
-            print(x)
-            y = self.model.predict(x, verbose=2)
-            print(y)
-
-        # Make a copy of the model to use as the target model.
-        self.target_model = clone_model(self.model)
-
-    def update(self):
-        # Sample minibatch of transitions from replay buffer.
-        # TODO: Sample proportionally to loss.
-        transitions = self.replay_buffer.sample(MINIBATCH_SIZE)
-
-        # Compute predictions of batch.
-        previous_input_tensors = np.array([transition.previous_phi.input_tensor()
-                                           for transition in transitions])
-        predictions = self.model.predict(previous_input_tensors, verbose=0)
-
-        # Compute targets of batch.
-        rewards = np.array([transition.compute_reward() for transition in transitions])
-        # If end of game, then it's just the reward. Otherwise it's the reward
-        # plus expected value of best action using target_model.
-        # TODO this complicates things a lot and nearly all transitions aren't
-        # game over, so just do the full thing and zero out the "best_futures"
-        # indices for the game over ones.
-        live_game_indices = np.array([i for i in range(len(transitions))
-                                      if not transitions[i].next_phi.game_states[-1].game_over])
-        #print("live_game_indices", live_game_indices)
-        next_input_tensors = np.array([transitions[i].next_phi.input_tensor() for i in live_game_indices])
-        #print("next_input_tensors", next_input_tensors[0])
-        if DDQN:
-            # Double DQN
-            live_futures = self.model.predict(next_input_tensors, verbose=0)
-            #print("live_futures", live_futures[0])
-            best_live_future_indices = np.argmax(live_futures, axis=1)
-            live_target_futures = self.target_model.predict(next_input_tensors, verbose=0)
-            best_live_futures = live_target_futures[
-                    np.arange(live_target_futures.shape[0]),best_live_future_indices]
-            #print("best_live_futures", best_live_futures)
-            best_futures = np.zeros(len(transitions))
-            best_futures[live_game_indices] = best_live_futures
-        else:
-            # DQN
-            live_futures = self.target_model.predict(next_input_tensors, verbose=0)
-            #print("live_futures", live_futures[0])
-            best_live_futures = np.max(live_futures, axis=1)
-            #print("best_live_futures", best_live_futures)
-            best_futures = np.zeros(len(transitions))
-            best_futures[live_game_indices] = best_live_futures
-        targets = rewards + GAMMA*best_futures
-
-        # Update targets for the actions we actually took.
-        actions = np.array([transition.action for transition in transitions])
-        fixed_predictions = predictions.copy()
-        fixed_predictions[np.arange(fixed_predictions.shape[0]),actions] = targets
-
-        # Perform gradient descent.
-        history = self.model.fit(previous_input_tensors, fixed_predictions, epochs=1, verbose=0)
-        return history.history["loss"][0], history.history["mae"][0], predictions
-
-    def take_target_model_snapshot(self):
-        self.target_model = clone_model(self.model)
-
-    def print_weights(self):
-        for i, layer in enumerate(self.model.layers):
-            print("Weights for layer %d:" % (i + 1,))
-            weights, biases = layer.get_weights()
-            print(weights)
-            print(biases)
-            print()
-
-# Compute the box (straight) average of the previous "size" numbers.
-class BoxAverage:
-    def __init__(self, size):
-        self.buffer = deque([], size)
-        self.sum = 0
-
-    def append(self, value):
-        if len(self.buffer) == self.buffer.maxlen:
-            self.sum -= self.buffer[0]
-        self.sum += value
-        self.buffer.append(value)
-
-    def average(self):
-        return self.sum / len(self.buffer) if len(self.buffer) != 0 else 0
+def dump_player_position_graph(model, filename):
+    with open(filename, "w") as f:
+        f.write("x [domain]\t" +
+                "\t".join(action if action != "" else "None"
+                          for action in game.ACTIONS) + "\n")
+        for x in range(128):
+            game_state = game.GameState()
+            game_state.set_entity_state(0, game.TYPE_PLAYER_SHOT, x, 42)
+            phi = Phi(None, game_state)
+            input_tensor = phi.input_tensor()
+            actions = model.predict(input_tensor[np.newaxis,:], verbose=0)[0]
+            f.write(str(x) + " " + " ".join(actions.astype(str)) + "\n")
 
 def learn():
     # Parameters of the neural network.
@@ -435,14 +341,16 @@ def learn():
     print("input_tensor_shape", input_tensor_shape)
     action_count = len(game.ACTIONS)
 
-    dqn = DQN(input_tensor_shape[0], action_count)
+    replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
+    replay_buffer.load()
+
+    dqn = DQN(input_tensor_shape[0], action_count, replay_buffer, LEARNING_RATE,
+              MINIBATCH_SIZE, DOUBLE_DQN, GAMMA)
     #print("Initial weights:")
     #dqn.print_weights()
-    dqn.replay_buffer.load()
 
-    if False and os.path.exists(WEIGHTS_FILENAME):
-        print("Loading weights from " + WEIGHTS_FILENAME)
-        dqn.model.load_weights(WEIGHTS_FILENAME)
+    if False:
+        dqn.load_weights()
 
     # Train on loaded replay buffer.
     if True:
@@ -457,12 +365,24 @@ def learn():
                                    "\t".join(action if action != "" else "None"
                                              for action in game.ACTIONS) + "\n")
             loss_file.write("Step [domain]\tLoss [zero]\tMAE [right,zero]\n")
+            predictions_acc = None
+            predictions_count = 0
             while True:
                 loss, mae, predictions = dqn.update()
+
+                if predictions_acc is None:
+                    predictions_acc = predictions
+                else:
+                    predictions_acc += predictions
+                predictions_count += 1
+
                 if learn_step % 1000 == 0:
+                    predictions_acc /= predictions_count
                     predictions_file.write(str(learn_step) + " " +
-                                           " ".join(predictions.mean(axis=0).astype(str)) + "\n")
+                                           " ".join(predictions_acc.mean(axis=0).astype(str)) + "\n")
                     predictions_file.flush()
+                    predictions_acc = None
+                    predictions_count = 0
                 loss_average.append(loss)
                 mae_average.append(mae)
                 learn_step += 1
@@ -477,8 +397,10 @@ def learn():
                     print("%d" % (learn_step,))
                     #dqn.print_weights()
                 if learn_step % 1000 == 0:
-                    print("Saving weights to " + WEIGHTS_FILENAME)
-                    dqn.model.save_weights(WEIGHTS_FILENAME)
+                    dqn.save_weights()
+                if learn_step % 1000 == 0:
+                    dump_player_position_graph(dqn.model, "model_player.txt")
+                    dump_player_position_graph(dqn.target_model, "target_model_player.txt")
         return
 
     # TODO I think the Lua version has a single loop of steps and they
@@ -595,10 +517,10 @@ def play():
     print("input_tensor_shape", input_tensor_shape)
     action_count = len(game.ACTIONS)
 
-    dqn = DQN(input_tensor_shape[0], action_count)
+    dqn = DQN(input_tensor_shape[0], action_count, REPLAY_BUFFER_SIZE, LEARNING_RATE,
+              MINIBATCH_SIZE, DOUBLE_DQN, GAMMA)
 
-    print("Loading weights from " + WEIGHTS_FILENAME)
-    dqn.model.load_weights(WEIGHTS_FILENAME)
+    dqn.load_weights()
     #dqn.print_weights()
 
     live_game = game.LiveGame(False)
@@ -619,7 +541,7 @@ def play():
         # Each iteration is an action chosen in the game.
         while True:
             input_tensor = phi.input_tensor()
-            print(input_tensor)
+            #print(input_tensor)
             time.sleep(0.040)
             actions = dqn.model.predict(input_tensor[np.newaxis,:], verbose=0)[0]
             action = np.argmax(actions)

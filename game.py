@@ -70,8 +70,6 @@ class GameState:
         return len(self.get_entities_by_types([TYPE_FUEL_CAN]))
 
     def set_entity_state(self, entity_index, entity_type, x, y):
-        if entity_index == 1:
-            print(1, entity_type, x, y)
         if entity_type == TYPE_DEAD:
             self.entities[entity_index] = None
         else:

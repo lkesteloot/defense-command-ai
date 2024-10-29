@@ -5,3 +5,7 @@ out*
 *.h5
 prediction*.txt
 loss*.txt
+model.txt
+target_model.txt
+model_player.txt
+target_model_player.txt
